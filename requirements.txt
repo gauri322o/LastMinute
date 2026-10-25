@@ -1,4 +1,6 @@
-streamlit>=1.37
+streamlit
 google-genai
-pandas
 pypdf
+pandas
+python-dotenv
+youtube-transcript-api

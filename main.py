@@ -21,6 +21,7 @@ from google.genai import types
 from pypdf import PdfReader
 
 st.set_page_config(page_title="Last Minute Study Assistant", page_icon="📚", layout="wide")
+st.sidebar.caption(f"Running: {__file__}")
 
 DATA_FILE = Path("study_sessions.json")
 
@@ -210,7 +211,24 @@ Each item must have these exact keys:
             last_error = e
     raise last_error
 
+def ask_tutor(client, model, text, images, question, deep):
+    prompt = f"""
+You are a gentle, expert study tutor.
+Using the study materials provided below, answer the student's question clearly and helpfully.
+If the answer is not explicitly in the study materials, use your general knowledge to explain it clearly, keeping it relevant to the context.
 
+Study Materials:
+{text or '(see the attached images)'}
+
+Student Question:
+{question}
+"""
+    contents = [prompt]
+    for data, mime in images:
+        contents.append(types.Part.from_bytes(data=data, mime_type=mime))
+
+    response = call_gemma(client, model, contents, deep)
+    return response.text
 # ----------------------------------------------------------------------------
 # Timer helpers (state changes happen in callbacks so the display is reliable)
 # ----------------------------------------------------------------------------
@@ -282,8 +300,8 @@ def render_timer():
 # ----------------------------------------------------------------------------
 st.title("📚 Last Minute Study Assistant")
 
-tab_sources, tab_quiz, tab_timer, tab_stats = st.tabs(
-    ["1️⃣ Sources", "2️⃣ Quiz", "⏱️ Study Timer", "📊 Analytics"]
+tab_sources, tab_quiz, tab_tutor, tab_timer, tab_stats = st.tabs(
+    ["1️⃣ Sources", "2️⃣ Quiz", "💬 Tutor", "⏱️ Study Timer", "📊 Analytics"]
 )
 
 # ---------------------------- Sources ---------------------------------------
@@ -412,6 +430,56 @@ with tab_quiz:
                         st.caption(q["explanation"])
             st.success(f"Score: {score} / {len(ss.quiz)}")
 
+# ---------------------------- Tutor -----------------------------------------
+with tab_tutor:
+    st.subheader("Ask your AI Tutor")
+    st.caption("Ask questions about your notes, uploaded PDFs, or images, and get instant explanations.")
+
+    tutor_query = st.text_input("What would you like explained or clarified?", placeholder="e.g. Can you explain the main concept from Chapter 2?")
+
+    if st.button("Ask Tutor", type="primary"):
+        text_parts = []
+        images = []
+        warnings = []
+
+        if notes and notes.strip():
+            text_parts.append(f"--- Notes ---\n{notes}")
+        if youtube_url and youtube_url.strip():
+            text_parts.append(f"--- YouTube Reference ---\nURL: {youtube_url}")
+
+        for f in uploaded_docs:
+            data = f.getvalue()
+            if not data:
+                continue
+            if f.name.lower().endswith(".pdf"):
+                try:
+                    pdf_text = pdf_to_text(data)
+                except Exception as e:
+                    pdf_text = ""
+                if pdf_text:
+                    text_parts.append(f"--- PDF: {f.name} ---\n{pdf_text}")
+
+        for f in uploaded_images:
+            ext = f.name.rsplit(".", 1)[-1].lower()
+            images.append((f.getvalue(), IMAGE_MIME.get(ext, "image/jpeg")))
+
+        context_text = "\n\n".join(text_parts)
+        if len(context_text) > MAX_CONTEXT_CHARS:
+            context_text = context_text[:MAX_CONTEXT_CHARS]
+
+        if not api_key:
+            st.error("Add your Gemini API key in the sidebar first.")
+        elif not tutor_query.strip():
+            st.warning("Please enter a question for the tutor.")
+        else:
+            try:
+                client = make_client(api_key)
+                with st.spinner(f"Tutor ({model_name}) is thinking..."):
+                    answer = ask_tutor(client, model_name, context_text, images, tutor_query, deep_thinking)
+                st.markdown("### Answer:")
+                st.markdown(answer)
+            except Exception as e:
+                st.error(f"Tutor response failed: {e}")
 # ---------------------------- Timer -----------------------------------------
 with tab_timer:
     st.subheader("Study timer")

@@ -1,7 +1,4 @@
-venv/
-.venv/
-__pycache__/
-*.pyc
 .env
-.streamlit/secrets.toml
+venv/
+__pycache__/
 study_sessions.json

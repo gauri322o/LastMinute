@@ -2,8 +2,8 @@
 LastMinute
 Hacktoberfest x MOSS Hack Day Udupi, 25 October 2026
 
-Turns your notes, PDFs and photos of textbook pages into a quiz using
-Gemma 4 (open-weight) through the Gemini API, and tracks your study time.
+Turns your notes, PDFs, YouTube transcripts and photos of textbook pages into a quiz
+and a tutor using Gemma 4 (open-weight) through the Gemini API, and tracks your study time.
 """
 
 import io
@@ -20,12 +20,24 @@ from google import genai
 from google.genai import types
 from pypdf import PdfReader
 
-# Import your custom styling and layout functions
-from style import inject_css, hero_html, scene_html
+try:
+    from dotenv import load_dotenv
 
-st.set_page_config(page_title="Last Minute Study Assistant", page_icon="📚", layout="wide")
+    load_dotenv()  # reads GEMINI_API_KEY from a local .env file if there is one
+except ImportError:
+    pass
 
-# Apply custom sage-green aesthetic and full-screen layout
+try:
+    from style import inject_css, title_html
+except ImportError:
+    # style.py is missing or an older version: fall back to a plain look
+    def inject_css():
+        pass
+
+    def title_html():
+        return "<h1 style='text-align:center'>📚 LastMinute</h1>"
+
+st.set_page_config(page_title="LastMinute", page_icon="📚", layout="wide")
 inject_css()
 
 DATA_FILE = Path("study_sessions.json")
@@ -67,6 +79,8 @@ ss.setdefault("sessions", load_sessions())
 ss.setdefault("quiz", None)
 ss.setdefault("quiz_model", "")
 ss.setdefault("quiz_submitted", False)
+ss.setdefault("tutor_answer", "")
+ss.setdefault("yt_cache", {})
 ss.setdefault("timer_running", False)
 ss.setdefault("timer_started_at", 0.0)
 ss.setdefault("timer_accumulated", 0.0)
@@ -81,7 +95,7 @@ api_key = st.sidebar.text_input(
     "Gemini API key",
     value=os.environ.get("GEMINI_API_KEY", ""),
     type="password",
-    help="Reads GEMINI_API_KEY from your environment by default. Never commit your key.",
+    help="Reads GEMINI_API_KEY from your environment or .env file by default. Never commit your key.",
 )
 model_name = st.sidebar.selectbox(
     "Gemma 4 model",
@@ -108,28 +122,39 @@ def make_client(key: str):
 
 
 def call_gemma(client, model: str, contents: list, deep: bool):
-    """Single place where the app calls Gemma 4 through the Gemini API."""
+    """Single place where the app calls Gemma 4 through the Gemini API.
+    Retries on temporary server errors, then falls back to plain settings."""
     level = "high" if deep else "minimal"
     try:
-        config = types.GenerateContentConfig(
+        full_config = types.GenerateContentConfig(
             temperature=0.7,
             thinking_config=types.ThinkingConfig(thinking_level=level),
         )
     except Exception:
         # Older google-genai versions don't know thinking_level
-        config = types.GenerateContentConfig(temperature=0.7)
+        full_config = types.GenerateContentConfig(temperature=0.7)
+    plain_config = types.GenerateContentConfig(temperature=0.7)
 
-    try:
-        return client.models.generate_content(model=model, contents=contents, config=config)
-    except Exception as e:
-        if "thinking" in str(e).lower():
-            plain = types.GenerateContentConfig(temperature=0.7)
-            return client.models.generate_content(model=model, contents=contents, config=plain)
-        raise
+    temporary = ("500", "503", "429", "internal", "unavailable", "overloaded", "deadline")
+    last_error = None
+    for attempt in range(3):
+        config = full_config if attempt == 0 else plain_config  # drop thinking after the first try
+        try:
+            return client.models.generate_content(model=model, contents=contents, config=config)
+        except Exception as e:
+            last_error = e
+            msg = str(e).lower()
+            if "thinking" in msg:
+                continue
+            if any(word in msg for word in temporary):
+                time.sleep(2 * (attempt + 1))  # wait 2s, then 4s
+                continue
+            raise
+    raise last_error
 
 
 # ----------------------------------------------------------------------------
-# Source reading
+# Source reading (shared by the Quiz and the Tutor)
 # ----------------------------------------------------------------------------
 def pdf_to_text(data: bytes) -> str:
     reader = PdfReader(io.BytesIO(data))
@@ -140,6 +165,99 @@ def pdf_to_text(data: bytes) -> str:
         except Exception:
             pages.append("")
     return "\n".join(pages).strip()
+
+
+def youtube_video_id(url: str):
+    m = re.search(r"(?:v=|youtu\.be/|/shorts/|/embed/|/live/)([A-Za-z0-9_-]{11})", url)
+    return m.group(1) if m else None
+
+
+def get_youtube_transcript(url: str):
+    """Returns (transcript_text, error_message). The video needs captions."""
+    video_id = youtube_video_id(url)
+    if not video_id:
+        return "", "that doesn't look like a YouTube video link"
+
+    if video_id in ss.yt_cache:
+        return ss.yt_cache[video_id], ""
+
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError:
+        return "", "youtube-transcript-api is not installed (run: python -m pip install youtube-transcript-api)"
+
+    langs = ["en", "en-IN", "hi", "kn"]
+    try:
+        if hasattr(YouTubeTranscriptApi, "get_transcript"):  # older versions
+            try:
+                items = YouTubeTranscriptApi.get_transcript(video_id, languages=langs)
+            except Exception:
+                items = next(iter(YouTubeTranscriptApi.list_transcripts(video_id))).fetch()
+            parts = [i["text"] for i in items]
+        else:  # newer versions
+            api = YouTubeTranscriptApi()
+            try:
+                fetched = api.fetch(video_id, languages=langs)
+            except Exception:
+                fetched = next(iter(api.list(video_id))).fetch()
+            parts = [s.text for s in fetched]
+    except Exception as e:
+        first_line = (str(e).strip().splitlines() or [""])[0]
+        return "", f"{type(e).__name__}: {first_line[:120]}"
+
+    text = " ".join(parts).strip()
+    if not text:
+        return "", "the transcript was empty"
+    ss.yt_cache[video_id] = text  # only successes are remembered
+    return text, ""
+
+
+def collect_materials(notes, youtube_url, uploaded_docs, uploaded_images):
+    """Gather everything from the Sources tab. Returns (text, images, warnings)."""
+    text_parts, images, warnings = [], [], []
+
+    if notes and notes.strip():
+        text_parts.append(f"--- Notes ---\n{notes}")
+
+    if youtube_url and youtube_url.strip():
+        link = youtube_url.strip()
+        transcript, err = get_youtube_transcript(link)
+        if transcript:
+            text_parts.append(f"--- YouTube transcript ({link}) ---\n{transcript}")
+        else:
+            warnings.append(
+                f"Couldn't get a transcript for that YouTube link ({err}). "
+                "Open the video's transcript on YouTube and paste it into the notes box instead."
+            )
+
+    for f in uploaded_docs:
+        data = f.getvalue()
+        if not data:
+            continue
+        if f.name.lower().endswith(".pdf"):
+            try:
+                pdf_text = pdf_to_text(data)
+            except Exception as e:
+                pdf_text = ""
+                warnings.append(f"Couldn't read {f.name}: {e}")
+            if pdf_text:
+                text_parts.append(f"--- PDF: {f.name} ---\n{pdf_text}")
+            else:
+                warnings.append(
+                    f"No text found in {f.name} (maybe a scan). Upload photos of its pages as images instead."
+                )
+        else:
+            text_parts.append(f"--- File: {f.name} ---\n{data.decode('utf-8', errors='ignore')}")
+
+    for f in uploaded_images:
+        ext = f.name.rsplit(".", 1)[-1].lower()
+        images.append((f.getvalue(), IMAGE_MIME.get(ext, "image/jpeg")))
+
+    text = "\n\n".join(text_parts)
+    if len(text) > MAX_CONTEXT_CHARS:
+        text = text[:MAX_CONTEXT_CHARS]
+        warnings.append(f"Your material was long, so only the first {MAX_CONTEXT_CHARS:,} characters were used.")
+    return text, images, warnings
 
 
 # ----------------------------------------------------------------------------
@@ -189,6 +307,7 @@ You are an expert study assistant.
 Using the study materials below (text, plus any attached images of notes, diagrams or textbook pages),
 write exactly {num_questions} multiple-choice quiz questions focusing on:
 {topic or 'General core concepts'}.
+Base every question on the materials, not on outside knowledge.
 
 Study Materials:
 {text or '(see the attached images)'}
@@ -218,7 +337,32 @@ Each item must have these exact keys:
 
 
 # ----------------------------------------------------------------------------
-# Timer helpers
+# Tutor helper
+# ----------------------------------------------------------------------------
+def ask_tutor(client, model, text, images, question, deep):
+    materials = text or ("(see the attached images)" if images else "(no study materials were added)")
+    prompt = f"""
+You are a gentle, expert study tutor.
+Using the study materials provided below, answer the student's question clearly and helpfully.
+If the answer is not explicitly in the study materials, use your general knowledge to explain it
+clearly, keeping it relevant to the context.
+
+Study Materials:
+{materials}
+
+Student Question:
+{question}
+"""
+    contents = [prompt]
+    for data, mime in images:
+        contents.append(types.Part.from_bytes(data=data, mime_type=mime))
+
+    response = call_gemma(client, model, contents, deep)
+    return response.text or "(The tutor returned an empty answer. Please try again.)"
+
+
+# ----------------------------------------------------------------------------
+# Timer helpers (state changes happen in callbacks so the display is reliable)
 # ----------------------------------------------------------------------------
 def elapsed_seconds() -> float:
     total = ss.timer_accumulated
@@ -284,28 +428,24 @@ def render_timer():
 
 
 # ----------------------------------------------------------------------------
-# Render Custom Aesthetic Hero & Scene
+# Page
 # ----------------------------------------------------------------------------
-st.markdown(hero_html(), unsafe_allow_html=True)
-st.markdown(scene_html(), unsafe_allow_html=True)
+st.markdown(title_html(), unsafe_allow_html=True)
 
-# ----------------------------------------------------------------------------
-# Main Tabs Workflow
-# ----------------------------------------------------------------------------
-tab_sources, tab_quiz, tab_timer, tab_stats = st.tabs(
-    ["1️⃣ Sources", "2️⃣ Quiz", "⏱️ Study Timer", "📊 Analytics"]
+tab_sources, tab_quiz, tab_tutor, tab_timer, tab_stats = st.tabs(
+    ["1️⃣ Sources", "2️⃣ Quiz", "💬 Tutor", "⏱️ Study Timer", "📊 Analytics"]
 )
 
 # ---------------------------- Sources ---------------------------------------
 with tab_sources:
     st.subheader("Add your study material")
-    st.caption("Everything you add here is used when you generate a quiz. No separate upload step.")
+    st.caption("Everything you add here is used by the Quiz and the Tutor. No separate upload step.")
 
     notes = st.text_area("Paste notes", height=180, key="notes")
     youtube_url = st.text_input(
         "YouTube link (optional)",
         key="youtube_url",
-        help="Only the link is passed to the model as text. It can't watch the video.",
+        help="The app reads the video's captions (transcript). Videos without captions won't work.",
     )
     uploaded_docs = st.file_uploader(
         "Upload PDFs or text files",
@@ -321,7 +461,8 @@ with tab_sources:
     )
     st.info(
         f"Ready: {len(notes or '')} characters of notes, "
-        f"{len(uploaded_docs)} document(s), {len(uploaded_images)} image(s)."
+        f"{len(uploaded_docs)} document(s), {len(uploaded_images)} image(s)"
+        f"{', 1 YouTube link' if (youtube_url or '').strip() else ''}."
     )
 
 # ---------------------------- Quiz ------------------------------------------
@@ -332,50 +473,19 @@ with tab_quiz:
     topic_focus = c2.text_input("Topic focus (optional)", placeholder="e.g. Chapter 3: Thermodynamics")
 
     if st.button("✨ Generate quiz", type="primary"):
-        text_parts = []
-        images = []
-        warnings = []
-
-        if notes and notes.strip():
-            text_parts.append(f"--- Notes ---\n{notes}")
-        if youtube_url and youtube_url.strip():
-            text_parts.append(f"--- YouTube Reference ---\nURL: {youtube_url}")
-
-        for f in uploaded_docs:
-            data = f.getvalue()
-            if not data:
-                continue
-            if f.name.lower().endswith(".pdf"):
-                try:
-                    pdf_text = pdf_to_text(data)
-                except Exception as e:
-                    pdf_text = ""
-                    warnings.append(f"Couldn't read {f.name}: {e}")
-                if pdf_text:
-                    text_parts.append(f"--- PDF: {f.name} ---\n{pdf_text}")
-                else:
-                    warnings.append(
-                        f"No text found in {f.name} (maybe a scan). Upload photos of its pages as images instead."
-                    )
-            else:
-                text_parts.append(f"--- File: {f.name} ---\n{data.decode('utf-8', errors='ignore')}")
-
-        for f in uploaded_images:
-            ext = f.name.rsplit(".", 1)[-1].lower()
-            images.append((f.getvalue(), IMAGE_MIME.get(ext, "image/jpeg")))
-
-        context_text = "\n\n".join(text_parts)
-        if len(context_text) > MAX_CONTEXT_CHARS:
-            context_text = context_text[:MAX_CONTEXT_CHARS]
-            warnings.append(f"Your material was long, so only the first {MAX_CONTEXT_CHARS:,} characters were used.")
-
+        context_text, images, warnings = collect_materials(
+            notes, youtube_url, uploaded_docs, uploaded_images
+        )
         for w in warnings:
             st.warning(w)
 
         if not api_key:
             st.error("Add your Gemini API key in the sidebar first.")
         elif not context_text.strip() and not images:
-            st.error("Add some notes, files or images in the Sources tab first.")
+            st.error(
+                "Nothing to build a quiz from. Add notes, files, images or a YouTube link "
+                "(with captions) in the Sources tab first."
+            )
         else:
             try:
                 client = make_client(api_key)
@@ -422,6 +532,44 @@ with tab_quiz:
                         st.caption(q["explanation"])
             st.success(f"Score: {score} / {len(ss.quiz)}")
 
+# ---------------------------- Tutor -----------------------------------------
+with tab_tutor:
+    st.subheader("Ask your AI tutor")
+    st.caption("Ask about your notes, PDFs, videos or photos from the Sources tab and get a clear explanation.")
+
+    tutor_query = st.text_input(
+        "What would you like explained?",
+        placeholder="e.g. Can you explain the main idea of Chapter 2?",
+        key="tutor_query",
+    )
+
+    if st.button("Ask tutor", type="primary"):
+        context_text, images, warnings = collect_materials(
+            notes, youtube_url, uploaded_docs, uploaded_images
+        )
+        for w in warnings:
+            st.warning(w)
+
+        if not api_key:
+            st.error("Add your Gemini API key in the sidebar first.")
+        elif not tutor_query.strip():
+            st.warning("Please type a question for the tutor.")
+        else:
+            try:
+                client = make_client(api_key)
+                with st.spinner(f"Tutor ({model_name}) is thinking…"):
+                    ss.tutor_answer = ask_tutor(
+                        client, model_name, context_text, images, tutor_query, deep_thinking
+                    )
+            except Exception as e:
+                ss.tutor_answer = ""
+                st.error(f"Tutor response failed: {e}")
+
+    if ss.tutor_answer:
+        st.divider()
+        st.markdown("### Answer")
+        st.markdown(ss.tutor_answer)
+
 # ---------------------------- Timer -----------------------------------------
 with tab_timer:
     st.subheader("Study timer")
@@ -435,6 +583,7 @@ with tab_timer:
     c1.text_input("Subject", value="General", key="timer_subject")
     c2.number_input("Chapters completed this session", min_value=0, value=0, step=1, key="timer_chapters")
 
+    # The display refreshes itself every second while the timer is running.
     timer_fragment = st.fragment(run_every=1 if ss.timer_running else None)(render_timer)
     timer_fragment()
 
