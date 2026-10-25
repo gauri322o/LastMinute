@@ -143,7 +143,8 @@ Built during build time (10:00 AM to 5:00 PM IST) on 25 October 2026 at Hacktobe
 
 ## License
 
-This project is released under the **MIT License** (see [`LICENSE`](LICENSE)). 
+This project is released under the **MIT License**  Distributed under the MIT License. See [LICENSE](https://opensource.org/license/mit) for more information.
+
 ## Acknowledgements
 
 - [Google Gemma 4](https://ai.google.dev/gemma) and the Gemini API
