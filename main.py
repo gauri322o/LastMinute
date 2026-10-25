@@ -1,5 +1,5 @@
 """
-Last Minute Study Assistant
+LastMinute
 Hacktoberfest x MOSS Hack Day Udupi, 25 October 2026
 
 Turns your notes, PDFs and photos of textbook pages into a quiz using

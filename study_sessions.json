@@ -16,5 +16,53 @@
     "hours": 0.0006,
     "chapters_completed": 2,
     "subject": "General"
+  },
+  {
+    "date": "2026-10-25",
+    "hours": 0.005,
+    "chapters_completed": 0,
+    "subject": "math"
+  },
+  {
+    "date": "2026-10-25",
+    "hours": 1.0,
+    "chapters_completed": 1,
+    "subject": "General"
+  },
+  {
+    "date": "2026-10-25",
+    "hours": 1.0,
+    "chapters_completed": 2,
+    "subject": "General"
+  },
+  {
+    "date": "2026-10-25",
+    "hours": 0.0016,
+    "chapters_completed": 4,
+    "subject": "General"
+  },
+  {
+    "date": "2026-10-25",
+    "hours": 2.0,
+    "chapters_completed": 4,
+    "subject": "math"
+  },
+  {
+    "date": "2026-10-25",
+    "hours": 2.0,
+    "chapters_completed": 4,
+    "subject": "english"
+  },
+  {
+    "date": "2026-10-25",
+    "hours": 2.0,
+    "chapters_completed": 4,
+    "subject": "evs"
+  },
+  {
+    "date": "2026-10-25",
+    "hours": 3.25,
+    "chapters_completed": 4,
+    "subject": "evs"
   }
 ]
